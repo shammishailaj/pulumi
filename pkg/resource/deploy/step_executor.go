@@ -29,6 +29,7 @@ import (
 const (
 	// Dummy workerID for synchronous operations.
 	synchronousWorkerID = -1
+	infiniteWorkerID    = -2
 
 	// Utility constant for easy debugging.
 	stepExecutorLogLevel = 4
@@ -349,6 +350,37 @@ func (se *stepExecutor) worker(workerID int) {
 	}
 }
 
+func (se *stepExecutor) infiniteWorker() {
+	workerID := 0
+	se.log(infiniteWorkerID, "infinite worker coming online")
+	defer se.workers.Done()
+	for {
+		se.log(infiniteWorkerID, "worker waiting for incoming chains")
+		select {
+		case request := <-se.incomingChains:
+			if request.Chain == nil {
+				se.log(infiniteWorkerID, "worker received nil chain, exiting")
+				return
+			}
+
+			se.log(infiniteWorkerID, "worker received chain for execution")
+			childWorkerID := workerID
+			se.workers.Add(1)
+			go func() {
+				defer se.workers.Done()
+				se.log(childWorkerID, "new oneshot worker coming online")
+				se.executeChain(childWorkerID, request.Chain)
+				close(request.CompletionChan)
+			}()
+
+			workerID++
+		case <-se.ctx.Done():
+			se.log(infiniteWorkerID, "worker exiting due to cancellation")
+			return
+		}
+	}
+}
+
 func newStepExecutor(ctx context.Context, cancel context.CancelFunc, plan *Plan, opts Options,
 	preview, continueOnError bool) *stepExecutor {
 	exec := &stepExecutor{
@@ -362,11 +394,19 @@ func newStepExecutor(ctx context.Context, cancel context.CancelFunc, plan *Plan,
 	}
 
 	exec.sawError.Store(false)
-	fanout := opts.DegreeOfParallelism()
-	for i := 0; i < fanout; i++ {
+	if true {
 		exec.workers.Add(1)
-		go exec.worker(i)
+		go exec.infiniteWorker()
 	}
 
 	return exec
+	/*
+		fanout := opts.DegreeOfParallelism()
+		for i := 0; i < fanout; i++ {
+			exec.workers.Add(1)
+			go exec.worker(i)
+		}
+	*/
+
+	// return exec
 }
