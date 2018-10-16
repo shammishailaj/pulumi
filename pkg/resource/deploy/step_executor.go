@@ -327,10 +327,11 @@ func (se *stepExecutor) log(workerID int, msg string, args ...interface{}) {
 
 // worker is the base function for all step executor worker goroutines. It continuously polls for new chains
 // and executes any that it gets from the channel.
-func (se *stepExecutor) worker(workerID int) {
+func (se *stepExecutor) worker(workerID int, launchAsync bool) {
 	se.log(workerID, "worker coming online")
 	defer se.workers.Done()
 
+	oneshotWorkerID := 0
 	for {
 		se.log(workerID, "worker waiting for incoming chains")
 		select {
@@ -341,41 +342,24 @@ func (se *stepExecutor) worker(workerID int) {
 			}
 
 			se.log(workerID, "worker received chain for execution")
-			se.executeChain(workerID, request.Chain)
-			close(request.CompletionChan)
-		case <-se.ctx.Done():
-			se.log(workerID, "worker exiting due to cancellation")
-			return
-		}
-	}
-}
-
-func (se *stepExecutor) infiniteWorker() {
-	workerID := 0
-	se.log(infiniteWorkerID, "infinite worker coming online")
-	defer se.workers.Done()
-	for {
-		se.log(infiniteWorkerID, "worker waiting for incoming chains")
-		select {
-		case request := <-se.incomingChains:
-			if request.Chain == nil {
-				se.log(infiniteWorkerID, "worker received nil chain, exiting")
-				return
+			if !launchAsync {
+				se.executeChain(workerID, request.Chain)
+				close(request.CompletionChan)
+				continue
 			}
 
-			se.log(infiniteWorkerID, "worker received chain for execution")
-			childWorkerID := workerID
 			se.workers.Add(1)
+			newWorkerID := oneshotWorkerID
 			go func() {
 				defer se.workers.Done()
-				se.log(childWorkerID, "new oneshot worker coming online")
-				se.executeChain(childWorkerID, request.Chain)
+				se.log(newWorkerID, "launching oneshot worker")
+				se.executeChain(newWorkerID, request.Chain)
 				close(request.CompletionChan)
 			}()
 
-			workerID++
+			oneshotWorkerID++
 		case <-se.ctx.Done():
-			se.log(infiniteWorkerID, "worker exiting due to cancellation")
+			se.log(workerID, "worker exiting due to cancellation")
 			return
 		}
 	}
@@ -394,19 +378,17 @@ func newStepExecutor(ctx context.Context, cancel context.CancelFunc, plan *Plan,
 	}
 
 	exec.sawError.Store(false)
-	if true {
+	if opts.InfiniteParallelism() {
 		exec.workers.Add(1)
-		go exec.infiniteWorker()
+		go exec.worker(infiniteWorkerID, true /*launchAsync*/)
+		return exec
+	}
+
+	fanout := opts.DegreeOfParallelism()
+	for i := 0; i < fanout; i++ {
+		exec.workers.Add(1)
+		go exec.worker(i, false /*launchAsync*/)
 	}
 
 	return exec
-	/*
-		fanout := opts.DegreeOfParallelism()
-		for i := 0; i < fanout; i++ {
-			exec.workers.Add(1)
-			go exec.worker(i)
-		}
-	*/
-
-	// return exec
 }
